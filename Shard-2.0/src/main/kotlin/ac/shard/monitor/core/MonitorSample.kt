@@ -1,0 +1,98 @@
+/*
+ * This file is part of Shard - https://github.com/KaelusAI/Shard
+ * Copyright (C) 2026 KaelusAI
+ *
+ * Shard is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Shard is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+package ac.shard.monitor.core
+
+import ac.shard.ai.label.LabelKey
+import ac.shard.detection.ModelCard
+import java.util.UUID
+
+data class MonitorSample(
+  val targetId: UUID,
+  val targetName: String,
+  val dataPresent: Boolean,
+  val aiActive: Boolean,
+  val probability: Double,
+  val buffer: Double,
+  val rawPing: Int,
+  val damageMultiplier: Double,
+  val prob90: Int,
+  val collect: MonitorCollectInfo? = null,
+  val inference: MonitorInferenceInfo? = null,
+  val leadingLabel: MonitorLabelInfo? = null,
+  val labelBuffers: Map<String, Double> = emptyMap(),
+  val labelProbabilities: Map<String, Double> = emptyMap(),
+  val declaredLabels: List<String> = emptyList(),
+  val tier: String = "NONE",
+  val score: Double = 0.0,
+  val rule: String = "",
+  val appliedForMillis: Long = 0L,
+  val model: String = "",
+  val models: List<ModelCard> = emptyList(),
+)
+
+data class MonitorLabelInfo(val label: String, val buffer: Double) {
+  companion object {
+    fun leading(buffers: Map<String, Double>): MonitorLabelInfo? = attributed(buffers).firstOrNull()
+
+    fun probabilityOfLeader(
+      buffers: Map<String, Double>,
+      probabilities: Map<String, Double>,
+      fallback: Double,
+    ): Double = leading(buffers)?.let { probabilities[it.label] } ?: fallback
+
+    private fun primaryLabel(key: String): Boolean = '/' !in key && !LabelKey.isReserved(key)
+
+    fun attributed(buffers: Map<String, Double>): List<MonitorLabelInfo> =
+      buffers
+        .asSequence()
+        .filter { primaryLabel(it.key) }
+        .filter { it.value > 0.0 }
+        .sortedByDescending { it.value }
+        .map { MonitorLabelInfo(it.key, it.value) }
+        .toList()
+
+    fun tracked(sample: MonitorSample): List<MonitorLabelInfo> {
+      val declared =
+        (sample.declaredLabels + sample.labelProbabilities.keys + sample.labelBuffers.keys)
+          .asSequence()
+          .filter(::primaryLabel)
+          .distinct()
+          .toList()
+      return declared
+        .withIndex()
+        .sortedWith(
+          compareByDescending<IndexedValue<String>> { sample.labelBuffers[it.value] ?: 0.0 }
+            .thenBy { it.index }
+        )
+        .map { MonitorLabelInfo(it.value, sample.labelBuffers[it.value] ?: 0.0) }
+    }
+  }
+}
+
+data class MonitorCollectInfo(
+  val status: String,
+  val label: String,
+  val windows: Int,
+  val elapsed: String,
+)
+
+data class MonitorInferenceInfo(
+  val status: String,
+  val fault: Boolean = false,
+  val named: Boolean = false,
+)

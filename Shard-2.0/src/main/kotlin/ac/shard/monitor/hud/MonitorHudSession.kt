@@ -1,0 +1,251 @@
+/*
+ * This file is part of Shard - https://github.com/KaelusAI/Shard
+ * Copyright (C) 2026 KaelusAI
+ *
+ * Shard is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Shard is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+package ac.shard.monitor.hud
+
+import ac.shard.detection.Prediction
+import ac.shard.monitor.core.MonitorChatStyle
+import ac.shard.monitor.core.MonitorLabelInfo
+import ac.shard.monitor.core.MonitorOutputKind
+import ac.shard.monitor.core.MonitorSample
+import ac.shard.monitor.core.MonitorSettings
+import ac.shard.monitor.core.MonitorTargetMode
+import ac.shard.platform.scheduler.TaskHandle
+import java.util.concurrent.atomic.AtomicBoolean
+import org.bukkit.entity.Player
+
+data class MonitorSessionSpec(
+  val viewer: Player,
+  val sessionId: Long,
+  val chatStyle: MonitorChatStyle,
+  val config: MonitorHudRuntimeConfig,
+  val targetMode: MonitorTargetMode = MonitorTargetMode.MANUAL,
+)
+
+class MonitorHudSession(private val spec: MonitorSessionSpec, outputs: List<MonitorOutput>) {
+  val cancelled = AtomicBoolean(false)
+
+  val targets = MonitorTargets()
+
+  var targetMode: MonitorTargetMode = spec.targetMode
+
+  var blanked = false
+    private set
+
+  var autoCycles = Int.MAX_VALUE
+
+  var autoTargets: List<Player> = emptyList()
+
+  val viewer: Player
+    get() = spec.viewer
+
+  val sessionId: Long
+    get() = spec.sessionId
+
+  val config: MonitorHudRuntimeConfig
+    get() = spec.config
+
+  val chatStyle: MonitorChatStyle
+    get() = spec.chatStyle
+
+  val context =
+    MonitorRenderContext(
+      spec.viewer,
+      spec.viewer.uniqueId,
+      spec.sessionId,
+      spec.chatStyle,
+      spec.config,
+    )
+
+  val outputs: MutableList<MonitorOutput> = outputs.toMutableList()
+
+  private val sendStates = HashMap<MonitorOutputKind, SendState>()
+
+  var task: TaskHandle? = null
+
+  fun trackTarget(target: Player, texts: UnavailableTexts): Boolean =
+    targets.add(
+      MonitorTargetState(
+        targetId = target.uniqueId,
+        targetName = target.name,
+        texts = texts,
+        threshold = spec.config.format.trendThreshold,
+        decayCycles = spec.config.behavior.trendDecayCycles,
+      )
+    )
+
+  fun render(
+    samples: List<MonitorSample>,
+    settings: MonitorSettings,
+    builder: MonitorFrameBuilder,
+  ) {
+    blanked = false
+    val frames = samples.mapNotNull { sample ->
+      targets.state(sample.targetId)?.let { state ->
+        state.advance(
+          sample,
+          spec.config.behavior.pingRefreshCycles,
+          spec.config.behavior.pingBucketMs,
+        )
+        frameFor(state, sample, settings, builder)
+      }
+    }
+    if (frames.isEmpty()) {
+      return
+    }
+    val settingsHash = settings.hashCode()
+    val payload = MonitorRenderPayload(frames, samples.associateBy { it.targetId })
+    outputs.toList().forEach { output ->
+      val state = sendStates.getOrPut(output.kind) { SendState() }
+      if (state.shouldSend(frames, settingsHash, output.policy(spec.config))) {
+        output.render(context, payload)
+        state.markSent(frames, settingsHash)
+      }
+    }
+  }
+
+  fun dropOutput(kind: MonitorOutputKind): Boolean {
+    sendStates.remove(kind)
+    return outputs.removeIf { it.kind == kind }
+  }
+
+  fun leaveAutoMode() {
+    if (targetMode.isAuto) {
+      targetMode = MonitorTargetMode.MANUAL
+      autoTargets = emptyList()
+    }
+  }
+
+  fun blank() {
+    if (blanked) {
+      return
+    }
+    blanked = true
+    sendStates.clear()
+    outputs.forEach { it.clear(context) }
+  }
+
+  fun teardown() {
+    outputs.forEach {
+      it.clear(context)
+      it.detach(context)
+    }
+  }
+
+  fun liveFrame(
+    event: Prediction,
+    settings: MonitorSettings,
+    builder: MonitorFrameBuilder,
+    tier: String,
+    model: String = "",
+  ): MonitorFrame? {
+    val state = targets.state(event.playerId) ?: return null
+    val sample = sampleOf(event, state, tier).copy(model = model)
+    return if (event.primary) {
+      frameFor(state, sample, settings, builder)
+    } else {
+      frameFor(
+        state,
+        sideSample(sample, event),
+        settings,
+        builder,
+        state.modelTrend(event.modelId, event.probability),
+      )
+    }
+  }
+
+  private fun sideSample(sample: MonitorSample, event: Prediction): MonitorSample =
+    sample.copy(
+      probability = event.probability,
+      leadingLabel = null,
+      labelBuffers = emptyMap(),
+      labelProbabilities = emptyMap(),
+    )
+
+  private fun frameFor(
+    state: MonitorTargetState,
+    sample: MonitorSample,
+    settings: MonitorSettings,
+    builder: MonitorFrameBuilder,
+    trend: Double? = null,
+  ): MonitorFrame =
+    builder.build(
+      MonitorFrameRequest(
+        sample = sample,
+        settings = settings,
+        pingValue = state.ping,
+        trend = trend ?: state.trend,
+        trendSettled = trend == null && state.trendSettled,
+        selfView = spec.viewer.uniqueId == state.targetId,
+        unavailableHeadline = if (sample.dataPresent) state.texts.noAiCheck else state.texts.noData,
+        collectVisible = spec.viewer.hasPermission(COLLECT_VIEW_PERMISSION),
+      ),
+      spec.config,
+    )
+
+  private class SendState {
+    private var lastFrames: List<MonitorFrame> = emptyList()
+    private var lastSettingsHash = 0
+    private var cyclesSinceSend = 0
+
+    fun shouldSend(
+      frames: List<MonitorFrame>,
+      settingsHash: Int,
+      policy: MonitorOutputPolicy,
+    ): Boolean {
+      val changed = frames != lastFrames || settingsHash != lastSettingsHash
+      cyclesSinceSend++
+      val throttled = policy.minIntervalCycles > 0 && cyclesSinceSend < policy.minIntervalCycles
+      val keepAlive = policy.keepAliveCycles > 0 && cyclesSinceSend >= policy.keepAliveCycles
+      return !throttled && (changed || keepAlive)
+    }
+
+    fun markSent(frames: List<MonitorFrame>, settingsHash: Int) {
+      lastFrames = frames
+      lastSettingsHash = settingsHash
+      cyclesSinceSend = 0
+    }
+  }
+
+  private fun sampleOf(
+    event: Prediction,
+    state: MonitorTargetState,
+    tier: String,
+  ): MonitorSample =
+    MonitorSample(
+      targetId = event.playerId,
+      targetName = event.playerName,
+      dataPresent = true,
+      aiActive = true,
+      probability =
+        MonitorLabelInfo.probabilityOfLeader(
+          event.labelBuffers,
+          event.labelProbabilities,
+          event.probability,
+        ),
+      buffer = event.bufferAfter,
+      rawPing = state.ping,
+      damageMultiplier = event.damageMultiplier,
+      prob90 = event.prob90,
+      leadingLabel = MonitorLabelInfo.leading(event.labelBuffers),
+      labelBuffers = event.labelBuffers,
+      labelProbabilities = event.labelProbabilities,
+      tier = tier,
+    )
+}
+
+private const val COLLECT_VIEW_PERMISSION = "shard.monitor.collect"

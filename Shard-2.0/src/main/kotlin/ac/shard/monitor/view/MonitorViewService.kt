@@ -1,0 +1,152 @@
+/*
+ * This file is part of Shard - https://github.com/KaelusAI/Shard
+ * Copyright (C) 2026 KaelusAI
+ *
+ * Shard is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Shard is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+package ac.shard.monitor.view
+
+import ac.shard.Shard
+import ac.shard.config.ConfigManager
+import ac.shard.monitor.core.ComponentCache
+import ac.shard.monitor.core.MonitorSampler
+import ac.shard.monitor.core.MonitorSettingsService
+import ac.shard.monitor.core.ScoreboardPacketBridge
+import ac.shard.monitor.core.ScoreboardSlotRegistry
+import ac.shard.scheduler.SchedulerService
+import com.github.retrooper.packetevents.PacketEvents
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import org.bukkit.Server
+import org.bukkit.entity.Player
+import org.bukkit.event.EventHandler
+import org.bukkit.event.Listener
+import org.bukkit.event.player.PlayerQuitEvent
+import org.bukkit.event.server.PluginDisableEvent
+
+@Suppress("LongParameterList")
+class MonitorViewService(
+  private val plugin: Shard,
+  private val configManager: ConfigManager,
+  scheduler: SchedulerService,
+  componentCache: ComponentCache,
+  sampler: MonitorSampler,
+  private val settingsService: MonitorSettingsService,
+  slotRegistry: ScoreboardSlotRegistry,
+  bridge: ScoreboardPacketBridge,
+) : Listener {
+  private val pinnedModels = ConcurrentHashMap<UUID, String>()
+
+  private val coordinator =
+    ViewSessionCoordinator(
+      plugin,
+      scheduler,
+      componentCache,
+      ViewTagRenderer(
+        sampler,
+        configManager.labelCatalog,
+        { viewer -> settingsService.getSettings(viewer.uniqueId).labelFocus },
+        { viewer -> settingsService.getSettings(viewer.uniqueId).models },
+        { viewer -> pinnedModels[viewer.uniqueId] },
+      ),
+      slotRegistry,
+      bridge,
+    )
+  private val trackingObserver =
+    ViewTrackingObserver(scheduler, coordinator, plugin.server) { viewerId ->
+      resolveActiveViewViewer(plugin.server, viewerId, coordinator)
+    }
+  private val teamConflictObserver = ViewTeamConflictObserver(coordinator)
+
+  @Volatile private var runtimeConfig = ViewRuntimeConfig.from(configManager.monitorConfig)
+  private var packetHooksRegistered = false
+
+  fun start() {
+    if (packetHooksRegistered) {
+      return
+    }
+    plugin.server.pluginManager.registerEvents(this, plugin)
+    PacketEvents.getAPI().eventManager.registerListener(trackingObserver)
+    PacketEvents.getAPI().eventManager.registerListener(teamConflictObserver)
+    packetHooksRegistered = true
+  }
+
+  fun toggle(viewer: Player): Boolean {
+    val viewerId = viewer.uniqueId
+    return if (coordinator.session(viewerId) != null) {
+      coordinator.disable(viewerId, viewer)
+      false
+    } else {
+      enable(viewer)
+      true
+    }
+  }
+
+  fun pinModel(viewer: Player, modelId: String?) {
+    if (modelId == null) pinnedModels.remove(viewer.uniqueId)
+    else pinnedModels[viewer.uniqueId] = modelId
+  }
+
+  fun enable(viewer: Player) {
+    coordinator.enable(viewer, runtimeConfig)
+  }
+
+  fun reload() {
+    runtimeConfig = ViewRuntimeConfig.from(configManager.monitorConfig)
+    coordinator.reload(runtimeConfig)
+  }
+
+  @EventHandler
+  fun onPlayerQuit(event: PlayerQuitEvent) {
+    val left = event.player
+    pinnedModels.remove(left.uniqueId)
+    coordinator.disable(left.uniqueId, left)
+    coordinator.removeTargetFromAllSessions(left.uniqueId, left.name)
+  }
+
+  @EventHandler
+  fun onPluginDisable(event: PluginDisableEvent) {
+    if (event.plugin !== plugin) {
+      return
+    }
+    for (viewerId in coordinator.activeViewerIds) {
+      coordinator.disable(viewerId, plugin.server.getPlayer(viewerId))
+    }
+  }
+}
+
+internal const val VIEW_PERMISSION = "shard.view"
+
+internal fun isTrackableViewTarget(viewer: Player, target: Player): Boolean {
+  return target.isOnline && viewer.world.uid == target.world.uid && viewer.canSee(target)
+}
+
+private fun resolveActiveViewViewer(
+  server: Server,
+  viewerId: UUID,
+  coordinator: ViewSessionCoordinator,
+): Player? {
+  val viewer = server.getPlayer(viewerId)
+  return when {
+    viewer == null || !viewer.isOnline -> {
+      coordinator.disable(viewerId, null)
+      null
+    }
+    !viewer.hasPermission(VIEW_PERMISSION) -> {
+      coordinator.disable(viewerId, viewer)
+      null
+    }
+    else -> viewer
+  }
+}

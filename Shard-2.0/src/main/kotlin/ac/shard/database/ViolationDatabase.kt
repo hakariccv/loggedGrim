@@ -1,0 +1,98 @@
+/*
+ * This file is part of Shard - https://github.com/KaelusAI/Shard
+ * Copyright (C) 2026 KaelusAI
+ *
+ * This file contains code derived from GrimAC.
+ * The original authors of GrimAC are credited below.
+ *
+ * Copyright (c) 2021-2026 GrimAC, DefineOutside and contributors.
+ *
+ * Shard is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Shard is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+package ac.shard.database
+
+import ac.shard.monitor.core.MonitorSettings
+import java.util.UUID
+
+data class KnownPlayer(val uuid: UUID, val name: String, val lastSeen: Long)
+
+interface ViolationDatabase {
+  fun logAlert(violation: Violation)
+
+  fun getLogCount(player: UUID): Int
+
+  fun getViolations(player: UUID, page: Int, limit: Int): List<Violation>
+
+  fun getUniqueViolatorsSince(since: Long): Int
+
+  fun recordLogin(playerUUID: UUID, timestamp: Long)
+
+  fun recordPlayer(playerUUID: UUID, name: String, seenAt: Long)
+
+  fun findPlayer(playerUUID: UUID): KnownPlayer?
+
+  fun findPlayersByName(name: String, limit: Int): List<KnownPlayer>
+
+  fun findPlayersByPrefix(prefix: String, limit: Int): List<KnownPlayer>
+
+  fun recordAttack(playerUUID: UUID, timestamp: Long)
+
+  fun countAttackersSince(since: Long): Int
+
+  fun countUniquePlayersSince(since: Long): Int
+
+  fun saveAiBuffer(playerUUID: UUID, buffer: Double, updatedAt: Long)
+
+  fun loadAiBuffer(playerUUID: UUID): AiBufferState?
+
+  fun saveAiLabelBuffers(playerUUID: UUID, buffers: Map<String, Double>, updatedAt: Long)
+
+  fun loadAiLabelBuffers(playerUUID: UUID): Map<String, AiBufferState>
+
+  fun clearAiLabelBuffers(playerUUID: UUID, match: (String) -> Boolean)
+
+  fun saveMitigationScore(playerUUID: UUID, state: StoredScore)
+
+  fun clearMitigationScore(playerUUID: UUID, at: Long)
+
+  fun loadMitigationScore(playerUUID: UUID): StoredScore?
+
+  fun saveAiSnapshot(playerUUID: UUID, snapshot: AiSnapshot)
+
+  fun loadAiSnapshot(playerUUID: UUID): AiSnapshot?
+
+  fun recordMitigation(playerUUID: UUID, entry: MitigationLogEntry)
+
+  fun getMitigationLog(playerUUID: UUID, limit: Int): List<MitigationLogEntry>
+
+  fun getMitigationLog(limit: Int): List<MitigationLogEntry>
+
+  fun getLogCount(since: Long): Int
+
+  fun getLogCounts(playerUUIDs: Collection<UUID>): Map<UUID, Int>
+
+  fun getViolations(page: Int, limit: Int, since: Long): List<Violation>
+
+  fun getViolationLevel(playerUUID: UUID, punishGroupName: String, since: Long = 0L): Int
+
+  fun recordFlag(playerUUID: UUID, punishGroupName: String, at: Long, since: Long): Int
+
+  fun resetViolationLevel(playerUUID: UUID, punishGroupName: String)
+
+  fun resetAllViolationLevels(playerUUID: UUID)
+
+  fun loadMonitorSettings(playerUUID: UUID): MonitorSettings?
+
+  fun saveMonitorSettings(playerUUID: UUID, settings: MonitorSettings)
+}

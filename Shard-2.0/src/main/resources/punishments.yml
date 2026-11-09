@@ -1,0 +1,69 @@
+# Placeholders in commands:
+#   <player>      player name
+#   <uuid>        player UUID
+#   <check_name>  name of the check that flagged
+#   <vl>          how many times this group has flagged the player
+#   <verbose>     extra detail from the check
+#   <labels>      labels the model attached to this detection, comma separated
+#
+# Special actions:
+#   [alert]             message staff with shard.alerts
+#   [log]               save the flag, shown in /shard logs
+#   [broadcast] <text>  message everyone online
+#   [reset]             reset this group's flag count
+#   [wait] <time>       pause before the next action (10s, 40t, 500ms)
+#   Any other line runs as a console command.
+#
+# commands: named command sets, local to this server. The panel sees only their names.
+#
+# groups: on each level a flag goes to the group naming its model or label most precisely,
+#         otherwise to that level's "other". Models without labels flag as "general".
+#   models / labels: what the group takes, everything when left out
+#   expire:  older flags stop counting (30d, 12h), nested groups inherit it
+#   actions: flag count -> command set, the highest step reached runs.
+#            { 1: warn, 3: ban-1h } warns on flags 1-2 and bans from flag 3, {} punishes nothing.
+#   groups / other: nested groups and where the flags none of them take go
+#
+# /shard punishments shows where each model and label goes.
+config-version: 2
+
+commands:
+  alert:
+    - "[alert]"
+    - "[log]"
+  warn:
+    - "[alert]"
+    - "[log]"
+    - "kick <player> Your combat looked unusual. Reconnect and keep playing."
+  ban-1h:
+    - "[alert]"
+    - "[log]"
+    - "tempban <player> 1h Your combat looked unusual."
+  ban-6h:
+    - "[alert]"
+    - "[log]"
+    - "tempban <player> 6h Your combat looked unusual."
+  ban-1d:
+    - "[alert]"
+    - "[log]"
+    - "tempban <player> 1d Your combat looked unusual."
+  ban-7d:
+    - "[alert]"
+    - "[log]"
+    - "tempban <player> 7d Your combat looked unusual."
+  ban-30d:
+    - "[alert]"
+    - "[log]"
+    - "[broadcast] <gradient:#39FF14:#ADFF2F>Shard</gradient> <gray>banned</gray> <white><player></white> <gray>for 30 days.</gray>"
+    - "tempban <player> 30d Your combat looked unusual."
+    - "[reset]"
+
+groups:
+  general:
+    labels: ["general", "aim"]
+    expire: 30d
+    actions: { 1: warn, 3: ban-1h, 6: ban-6h, 12: ban-1d, 20: ban-7d, 30: ban-30d }
+
+other:
+  expire: 30d
+  actions: { 1: alert }
